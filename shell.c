@@ -3,6 +3,7 @@
 #include <string.h> // Required for strcmp
 #include <unistd.h>   // Required for fork, execvp, chdir
 #include <sys/wait.h> // Required for wait
+#include <fcntl.h> // Required for O_WRONLY, O_CREAT, etc.
 
 #define MAX_CMD_LEN 1024
 #define MAX_ARGS 64
@@ -25,6 +26,56 @@ void parse_input(char *line, char **args) {
     // This line is so that if there are more than MAX_ARGS argument we still exit from loop and the execvp looks
     // for null so we replace the last argument with NULL
     args[i] = NULL; 
+}
+
+void handle_redirection(char **args) {
+    for (int i = 0; args[i] != NULL; i++) {
+        
+        // Output Redirection (>)
+        if (strcmp(args[i], ">") == 0) {
+            if (args[i+1] == NULL) {
+                fprintf(stderr, "Syntax error: expected file after >\n");
+                exit(1);
+            }
+            
+            // Open file with flags + permissions (0644)
+            // Flag 1: Open for writing only.
+            // Flag 2: Create if missing.
+            // Flag 3: Empty the file if it exists.
+            int fd = open(args[i+1], O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd < 0) {
+                perror("open failed");
+                exit(1);
+            }
+            
+            // Redirect Standard Output (1) to this file
+            dup2(fd, STDOUT_FILENO); 
+            close(fd); // Close the original file descriptor, we don't need it anymore
+            
+            args[i] = NULL; // Cut the command here so execvp doesn't see ">"
+        }
+        
+        // Input Redirection (<)
+        else if (strcmp(args[i], "<") == 0) {
+            if (args[i+1] == NULL) {
+                fprintf(stderr, "Syntax error: expected file after <\n");
+                exit(1);
+            }
+            
+            // Open for Reading Only
+            int fd = open(args[i+1], O_RDONLY);
+            if (fd < 0) {
+                perror("open failed");
+                exit(1);
+            }
+            
+            // Redirect Standard Input (0) to this file
+            dup2(fd, STDIN_FILENO);
+            close(fd);
+            
+            args[i] = NULL; // Cut the command
+        }
+    }
 }
 
 void execute_command(char **args) {
@@ -52,8 +103,12 @@ void execute_command(char **args) {
     } 
     else if (pid == 0) {
         // CHILD 
-        execvp(args[0], args);
         
+        // Handle Redirection first then execute
+        handle_redirection(args);
+
+        execvp(args[0], args);
+
         // If we get here, execvp failed
         perror("myshell"); 
         exit(1);

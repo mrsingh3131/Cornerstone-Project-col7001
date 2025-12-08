@@ -1,0 +1,12 @@
+total 56
+drwxr-xr-x  11 karan  staff   352 Dec  9 01:32 .
+drwx------@ 53 karan  staff  1696 Dec  9 00:54 ..
+drwxr-xr-x  15 karan  staff   480 Dec  9 01:00 .git
+-rw-r--r--   1 karan  staff   454 Dec  9 00:52 .gitignore
+drwxr-xr-x   5 karan  staff   160 Dec  8 19:48 .vscode
+drwxr-xr-x   2 karan  staff    64 Dec  8 20:02 Lab 1
+-rw-r--r--   1 karan  staff    87 Dec  8 19:44 README.md
+-rwxr-xr-x   1 karan  staff  9880 Dec  9 01:32 shell
+-rw-r--r--   1 karan  staff  4463 Dec  9 01:32 shell.c
+drwxr-xr-x   3 karan  staff    96 Dec  8 20:24 shell.dSYM
+-rw-r--r--   1 karan  staff     0 Dec  9 01:32 test.txt
