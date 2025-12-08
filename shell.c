@@ -4,9 +4,16 @@
 #include <unistd.h>   // Required for fork, execvp, chdir
 #include <sys/wait.h> // Required for wait
 #include <fcntl.h> // Required for O_WRONLY, O_CREAT, etc.
+#include <signal.h> // Required for signal
 
 #define MAX_CMD_LEN 1024
 #define MAX_ARGS 64
+
+void handle_sigchld(int sig) {
+    (void)sig; // Silence the unused parameter warning
+    // Clean up any child processes that have finished
+    while (waitpid(-1, NULL, WNOHANG) > 0);
+}
 
 // Takes a raw string "line" and fills the "args" array with pointers to tokens
 void parse_input(char *line, char **args) {
@@ -83,6 +90,19 @@ void execute_command(char **args) {
         return; // Empty command
     }
 
+    // Background Detection Flag
+    int background = 0;
+    int i = 0;
+    while (args[i] != NULL){
+        i++;
+    }
+
+    // Check if the very last argument is "&"
+    if (i > 0 && strcmp(args[i-1], "&") == 0) {
+        background = 1;
+        args[i-1] = NULL; // Remove "&" so the command doesn't see it
+    }
+
     // Built-in: cd
     if (strcmp(args[0], "cd") == 0) {
         if (args[1] == NULL) {
@@ -103,7 +123,7 @@ void execute_command(char **args) {
     } 
     else if (pid == 0) {
         // CHILD 
-        
+    
         // Handle Redirection first then execute
         handle_redirection(args);
 
@@ -115,13 +135,21 @@ void execute_command(char **args) {
     } 
     else {
         // PARENT waiting for child to exit
-        wait(NULL);
+        if (background == 0) {
+            wait(NULL); // Wait for foreground process
+        } else {
+            printf("[Started process %d]\n", pid); // Don't wait
+        }
     }
 }
 
 int main() {
     char command[MAX_CMD_LEN];
     char *args[MAX_ARGS]; // Array to hold the parsed tokens
+
+    // Register signal handler to prevent zombies
+    signal(SIGCHLD, handle_sigchld);
+
 
     while (1) {
         printf("myshell> ");
