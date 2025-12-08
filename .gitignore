@@ -41,3 +41,6 @@
 
 # debug information files
 *.dwo
+shell
+shell.dSYM/Contents/Resources/Relocations/x86_64/shell.yml
+shell.dSYM/Contents/Info.plist
