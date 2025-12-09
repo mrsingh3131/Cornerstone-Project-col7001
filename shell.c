@@ -35,6 +35,62 @@ void parse_input(char *line, char **args) {
     args[i] = NULL; 
 }
 
+// parse_quoted_input (Quoted Strings) 
+// Scanning: Move forward until we find a non-space character which will be our start of token.
+// Reading: Move forward.
+//     If we hit a Space and we are not inside quotes we see this as end of token.
+//     If we hit a Quote " then we toggle the in_quotes flag and remove the quote character.
+//     If we hit a Space and we are inside quotes then we keep reading and treat space as a normal letter.
+void parse_quoted_input(char *line, char **args) {
+    int arg_count = 0;
+    char *ptr = line;
+    int in_quotes = 0;
+    
+    // Clear args array first (good hygiene)
+    for(int i=0; i<MAX_ARGS; i++) args[i] = NULL;
+
+    while (*ptr != '\0' && arg_count < MAX_ARGS - 1) {
+        // 1. Skip leading whitespace (only if NOT in quotes)
+        while (*ptr == ' ' || *ptr == '\t' || *ptr == '\n') {
+            *ptr = '\0'; // Null-terminate the previous token
+            ptr++;
+        }
+        
+        if (*ptr == '\0') break; // End of line
+
+        // 2. Check for quote at start of token
+        if (*ptr == '"') {
+            in_quotes = 1;
+            ptr++; // Skip the opening quote
+        } 
+        
+        // Mark the start of the current argument
+        args[arg_count] = ptr; 
+        
+        // 3. Scan for the end of this argument
+        while (*ptr != '\0') {
+            if (in_quotes) {
+                if (*ptr == '"') {
+                    // Closing quote found!
+                    in_quotes = 0;
+                    *ptr = '\0'; // Terminate string here
+                    ptr++;
+                    break; // Move to next token
+                }
+            } else {
+                if (*ptr == ' ' || *ptr == '\t' || *ptr == '\n') {
+                    // Space found (and not in quotes) -> End of arg
+                    break; 
+                }
+            }
+            ptr++;
+        }
+        
+        arg_count++;
+    }
+    args[arg_count] = NULL;
+}
+
 void handle_redirection(char **args) {
     for (int i = 0; args[i] != NULL; i++) {
         
@@ -220,7 +276,7 @@ int main() {
         }
 
         // parsing begins
-        parse_input(command, args);
+        parse_quoted_input(command, args);
 
         // Debugging parser temporarily
         // printf("Parsed commands:\n");
