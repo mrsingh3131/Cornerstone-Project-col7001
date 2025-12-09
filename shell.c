@@ -25,25 +25,6 @@ void handle_sigint(int sig) {
     // Protip We use write instead of printf because printf is not "async-signal-safe" 
     // printf can cause deadlocks if interrupted. write is safe.
 }
-// Takes a raw string "line" and fills the "args" array with pointers to tokens
-void parse_input(char *line, char **args) {
-    int i = 0;
-
-    // Get the first token split by Space, Tab, and Newline
-    args[i] = strtok(line, " \t\n");
-
-    // Loop to get the rest
-    while (args[i] != NULL && i < MAX_ARGS - 1) {
-        i++;
-        // why NULL here? so that strtok can run from where it last left
-        args[i] = strtok(NULL, " \t\n"); 
-    }
-    
-    // IMPORTANT: The list of arguments must end with a NULL pointer so execvp knows where to stop reading.
-    // This line is so that if there are more than MAX_ARGS argument we still exit from loop and the execvp looks
-    // for null so we replace the last argument with NULL
-    args[i] = NULL; 
-}
 
 // parse_quoted_input (Quoted Strings) 
 // Scanning: Move forward until we find a non-space character which will be our start of token.
