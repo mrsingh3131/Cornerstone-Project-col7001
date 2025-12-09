@@ -15,6 +15,14 @@ void handle_sigchld(int sig) {
     while (waitpid(-1, NULL, WNOHANG) > 0);
 }
 
+void handle_sigint(int sig) {
+    (void)sig; // Silence the unused parameter warning
+    // Write a new line so the ^C doesn't mess up the formatting
+    write(STDOUT_FILENO, "\n", 1); 
+
+    // Protip We use write instead of printf because printf is not "async-signal-safe" 
+    // printf can cause deadlocks if interrupted. write is safe.
+}
 // Takes a raw string "line" and fills the "args" array with pointers to tokens
 void parse_input(char *line, char **args) {
     int i = 0;
@@ -255,8 +263,10 @@ int main() {
     char command[MAX_CMD_LEN];
     char *args[MAX_ARGS]; // Array to hold the parsed tokens
 
-    // Register signal handler to prevent zombies
-    signal(SIGCHLD, handle_sigchld);
+    // Register signal handlers
+    signal(SIGCHLD, handle_sigchld); // this prevents zombies
+
+    signal(SIGINT, handle_sigint);   // Handle Ctrl-C
 
 
     while (1) {
