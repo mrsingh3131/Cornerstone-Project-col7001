@@ -152,13 +152,14 @@ void handle_redirection(char **args) {
 // Handles "cmd1 | cmd2"
 void run_pipeline(char **args, int pipe_idx, int background) {
     int fd[2];
+    pid_t pid1, pid2; // Variables to store PIDs so we can kill only the specific PIDs
     if (pipe(fd) == -1) { perror("pipe"); return; }
 
     args[pipe_idx] = NULL; // Split the args array
     char **args2 = &args[pipe_idx + 1];
 
     // --- Left Child (cmd1) ---
-    if (fork() == 0) {
+    if ((pid1 = fork()) == 0) { // Store PID in pid1
         close(fd[0]);               // Close Read end
         dup2(fd[1], STDOUT_FILENO); // Output -> Pipe Write
         close(fd[1]);               // Close Write end
@@ -170,7 +171,7 @@ void run_pipeline(char **args, int pipe_idx, int background) {
     }
 
     // --- Right Child (cmd2) ---
-    if (fork() == 0) {
+    if ((pid2 = fork()) == 0) {// Store PID in pid2
         close(fd[1]);               // Close Write end
         dup2(fd[0], STDIN_FILENO);  // Input <- Pipe Read
         close(fd[0]);               // Close Read end
@@ -186,8 +187,13 @@ void run_pipeline(char **args, int pipe_idx, int background) {
     close(fd[1]);
     
     if (!background) {
-        wait(NULL);
-        wait(NULL);
+        // wait(NULL);
+        // wait(NULL);
+
+        // FIX: Wait for specific PIDs
+        waitpid(pid1, NULL, 0);
+        waitpid(pid2, NULL, 0);
+        
     } else {
         printf("[Started pipeline in background]\n");
     }
@@ -252,7 +258,10 @@ void execute_command(char **args) {
     else {
         // PARENT waiting for child to exit
         if (background == 0) {
-            wait(NULL); // Wait for foreground process
+            // FIX: Wait ONLY for this specific child (pid)
+            // If the signal handler already reaped it, this returns -1 (which is fine, we move on).
+            waitpid(pid, NULL, 0);
+            // wait(NULL); // Wait for foreground process
         } else {
             printf("[Started process %d]\n", pid); // Don't wait
         }
