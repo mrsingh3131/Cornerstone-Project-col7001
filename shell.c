@@ -85,6 +85,50 @@ void handle_redirection(char **args) {
     }
 }
 
+// Handles "cmd1 | cmd2"
+void run_pipeline(char **args, int pipe_idx, int background) {
+    int fd[2];
+    if (pipe(fd) == -1) { perror("pipe"); return; }
+
+    args[pipe_idx] = NULL; // Split the args array
+    char **args2 = &args[pipe_idx + 1];
+
+    // --- Left Child (cmd1) ---
+    if (fork() == 0) {
+        close(fd[0]);               // Close Read end
+        dup2(fd[1], STDOUT_FILENO); // Output -> Pipe Write
+        close(fd[1]);               // Close Write end
+        
+        handle_redirection(args);   // Handle < in first command
+        execvp(args[0], args);
+        perror("exec cmd1");
+        exit(1);
+    }
+
+    // --- Right Child (cmd2) ---
+    if (fork() == 0) {
+        close(fd[1]);               // Close Write end
+        dup2(fd[0], STDIN_FILENO);  // Input <- Pipe Read
+        close(fd[0]);               // Close Read end
+        
+        handle_redirection(args2);  // Handle > in second command
+        execvp(args2[0], args2);
+        perror("exec cmd2");
+        exit(1);
+    }
+
+    // --- Parent ---
+    close(fd[0]);
+    close(fd[1]);
+    
+    if (!background) {
+        wait(NULL);
+        wait(NULL);
+    } else {
+        printf("[Started pipeline in background]\n");
+    }
+}
+
 void execute_command(char **args) {
     if (args[0] == NULL) {
         return; // Empty command
@@ -115,7 +159,15 @@ void execute_command(char **args) {
         return; // Done. Do not fork.
     }
 
-    // External Commands
+    // Pipeline Detection 
+    for (int j = 0; args[j] != NULL; j++) {
+        if (strcmp(args[j], "|") == 0) {
+            run_pipeline(args, j, background);
+            return; // Pipeline handled, return immediately
+        }
+    }
+
+    // Standard Commands
     pid_t pid = fork();
 
     if (pid < 0) {
