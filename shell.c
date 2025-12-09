@@ -19,7 +19,7 @@ void handle_sigint(int sig) {
     (void)sig; // Silence the unused parameter warning
     // Write a new line so the ^C doesn't mess up the formatting
 
-    char msg[] = "\nmyshell> ";
+    char msg[] = "\n";
     write(STDOUT_FILENO, msg, sizeof(msg) - 1);
 
     // Protip We use write instead of printf because printf is not "async-signal-safe" 
