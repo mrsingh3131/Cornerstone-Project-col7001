@@ -18,7 +18,9 @@ void handle_sigchld(int sig) {
 void handle_sigint(int sig) {
     (void)sig; // Silence the unused parameter warning
     // Write a new line so the ^C doesn't mess up the formatting
-    write(STDOUT_FILENO, "\n", 1); 
+
+    char msg[] = "\nmyshell> ";
+    write(STDOUT_FILENO, msg, sizeof(msg) - 1);
 
     // Protip We use write instead of printf because printf is not "async-signal-safe" 
     // printf can cause deadlocks if interrupted. write is safe.
@@ -193,7 +195,7 @@ void run_pipeline(char **args, int pipe_idx, int background) {
         // FIX: Wait for specific PIDs
         waitpid(pid1, NULL, 0);
         waitpid(pid2, NULL, 0);
-        
+
     } else {
         printf("[Started pipeline in background]\n");
     }
