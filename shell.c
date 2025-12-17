@@ -185,51 +185,132 @@ void run_pipeline(char **args, int pipe_idx, int background) {
     }
 }
 
+// --- BREAKPOINT HELPERS ---
+
+struct Breakpoint {
+    unsigned long addr;
+    unsigned int orig_data; // Store the original 4 bytes
+    int active;
+};
+
+// Simple storage for up to 10 breakpoints
+struct Breakpoint breakpoints[10]; 
+int bp_count = 0;
+
+void enable_breakpoint(pid_t pid, struct Breakpoint *bp) {
+    // 1. Read the 4 bytes at the address (PT_READ_D is for Data)
+    unsigned int data = ptrace(PT_READ_D, pid, (caddr_t)bp->addr, 0);
+    
+    // 2. Save original data so we can restore it later
+    bp->orig_data = data;
+    
+    // 3. Modify the lowest byte to 0xCC (INT 3)
+    // We use a bitmask: (data & ~0xFF) keeps top 3 bytes, | 0xCC sets bottom byte
+    unsigned int data_with_trap = (data & ~0xFF) | 0xCC;
+    
+    // 4. Write the modified data back
+    ptrace(PT_WRITE_D, pid, (caddr_t)bp->addr, data_with_trap);
+    bp->active = 1;
+    printf("Breakpoint set at 0x%lx\n", bp->addr);
+}
+
+void disable_breakpoint(pid_t pid, struct Breakpoint *bp) {
+    // 1. Write the original data back to memory
+    ptrace(PT_WRITE_D, pid, (caddr_t)bp->addr, bp->orig_data);
+    bp->active = 0;
+}
+
 void run_debug_loop(pid_t pid) {
     char line[1024];
     int status;
-    
-    printf("Debugger started. Type 'continue' to run or 'quit' to exit.\n");
+    x86_thread_state64_t state; // To hold registers
+
+    printf("Debugger started. Type 'break <addr>', 'continue', or 'quit'.\n");
 
     while (1) {
         printf("minidbg> ");
         if (fgets(line, sizeof(line), stdin) == NULL) break;
-
-        // Remove newline
         line[strcspn(line, "\n")] = 0;
 
-        // Simple tokenizer
         char *command = strtok(line, " ");
         if (command == NULL) continue;
 
-        if (strcmp(command, "continue") == 0) {
-            // Resume execution
-            // Arg 3: (caddr_t)1 tells macOS "continue from current PC".
-            // Arg 4: Must be 0 (signal), not NULL.
-            ptrace(PT_CONTINUE, pid, (caddr_t)1, 0);
+        // --- COMMAND: BREAK ---
+        if (strcmp(command, "break") == 0) {
+            char *addr_str = strtok(NULL, " ");
+            if (addr_str) {
+                // Parse hex string to unsigned long
+                unsigned long addr = strtoul(addr_str, NULL, 16);
+                
+                // Add to our list
+                breakpoints[bp_count].addr = addr;
+                enable_breakpoint(pid, &breakpoints[bp_count]);
+                bp_count++;
+            } else {
+                printf("Usage: break <hex_address>\n");
+            }
+        }
+        // --- COMMAND: CONTINUE ---
+        else if (strcmp(command, "continue") == 0) {
             
-            // Wait for the child to stop or exit
+            // 1. Check if we are stopped at a breakpoint right now
+            ptrace(PT_GETREGS, pid, (caddr_t)&state, 0);
+            unsigned long rip = state.__rip; // Get current instruction pointer
+
+            // Check if RIP-1 matches any of our breakpoints
+            // (RIP is usually 1 byte past the 0xCC instruction)
+            struct Breakpoint *current_bp = NULL;
+            for (int i = 0; i < bp_count; i++) {
+                if (breakpoints[i].active && breakpoints[i].addr == (rip - 1)) {
+                    current_bp = &breakpoints[i];
+                    break;
+                }
+            }
+
+            // 2. If we ARE at a breakpoint, we need to Step-Over it
+            if (current_bp != NULL) {
+                // A. Rewind RIP by 1 to point at the original instruction
+                state.__rip -= 1;
+                ptrace(PT_SETREGS, pid, (caddr_t)&state, 0);
+
+                // B. Restore original code (remove 0xCC)
+                disable_breakpoint(pid, current_bp);
+
+                // C. Single step (execute that one original instruction)
+                ptrace(PT_STEP, pid, (caddr_t)1, 0);
+                waitpid(pid, &status, 0); // Wait for step to finish
+
+                // D. Check if child died during step
+                if (WIFEXITED(status)) break;
+
+                // E. Re-enable breakpoint (put 0xCC back)
+                enable_breakpoint(pid, current_bp);
+            }
+
+            // 3. Resume normal execution
+            ptrace(PT_CONTINUE, pid, (caddr_t)1, 0);
             waitpid(pid, &status, 0);
 
+            // 4. Report status
             if (WIFEXITED(status)) {
                 printf("Child exited with status %d\n", WEXITSTATUS(status));
-                break; // Exit debugger, return to shell
+                break;
             } 
             else if (WIFSTOPPED(status)) {
-                printf("Child stopped (Signal: %d)\n", WSTOPSIG(status));
+                // If stopped by SIGTRAP (5), it's likely a breakpoint
+                if (WSTOPSIG(status) == SIGTRAP) {
+                     printf("Hit breakpoint!\n");
+                } else {
+                     printf("Child stopped (Signal: %d)\n", WSTOPSIG(status));
+                }
             }
         } 
         else if (strcmp(command, "quit") == 0) {
-            // Kill the child process if we quit the debugger
             kill(pid, SIGKILL);
             break;
         }
-        else {
-            printf("Unknown command: %s\n", command);
-        }
     }
 }
-
 void start_debugger(char **args) {
     printf("Starting debugger for %s...\n", args[1]);
 
