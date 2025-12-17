@@ -261,12 +261,7 @@ void print_registers(pid_t pid) {
     // 1. Get the Mach task port for the process
     mach_port_t task;
     kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
-    if (kr != KERN_SUCCESS) {
-        // This might fail without sudo, but let's try
-        printf("Error getting task: %d\n", kr);
-        return;
-    }
-
+    
     // --- GRACEFUL ERROR HANDLING ---
     if (kr != KERN_SUCCESS) {
         // We failed to get the task. Check the error code.
