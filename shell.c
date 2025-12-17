@@ -5,6 +5,9 @@
 #include <sys/wait.h> // Required for wait
 #include <fcntl.h> // Required for O_WRONLY, O_CREAT, etc.
 #include <signal.h> // Required for signal
+#include <sys/ptrace.h>
+#include <sys/wait.h>
+#include <sys/user.h>
 
 #define MAX_CMD_LEN 1024
 #define MAX_ARGS 64
@@ -182,9 +185,99 @@ void run_pipeline(char **args, int pipe_idx, int background) {
     }
 }
 
+void run_debug_loop(pid_t pid) {
+    char line[1024];
+    int status;
+    
+    printf("Debugger started. Type 'continue' to run or 'quit' to exit.\n");
+
+    while (1) {
+        printf("minidbg> ");
+        if (fgets(line, sizeof(line), stdin) == NULL) break;
+
+        // Remove newline
+        line[strcspn(line, "\n")] = 0;
+
+        // Simple tokenizer
+        char *command = strtok(line, " ");
+        if (command == NULL) continue;
+
+        if (strcmp(command, "continue") == 0) {
+            // Resume execution
+            // Arg 3: (caddr_t)1 tells macOS "continue from current PC".
+            // Arg 4: Must be 0 (signal), not NULL.
+            ptrace(PT_CONTINUE, pid, (caddr_t)1, 0);
+            
+            // Wait for the child to stop or exit
+            waitpid(pid, &status, 0);
+
+            if (WIFEXITED(status)) {
+                printf("Child exited with status %d\n", WEXITSTATUS(status));
+                break; // Exit debugger, return to shell
+            } 
+            else if (WIFSTOPPED(status)) {
+                printf("Child stopped (Signal: %d)\n", WSTOPSIG(status));
+            }
+        } 
+        else if (strcmp(command, "quit") == 0) {
+            // Kill the child process if we quit the debugger
+            kill(pid, SIGKILL);
+            break;
+        }
+        else {
+            printf("Unknown command: %s\n", command);
+        }
+    }
+}
+
+void start_debugger(char **args) {
+    printf("Starting debugger for %s...\n", args[1]);
+
+    pid_t pid = fork();
+
+    if (pid == 0) {
+        // --- CHILD ---
+        // Arg 3: NULL is fine here.
+        // Arg 4: Must be 0 (int), not NULL.
+        ptrace(PT_TRACE_ME, 0, NULL, 0);
+        
+        // Execute the target. We pass &args[1] so the target sees 
+        // its own name as argv[0], not "debug"
+        execvp(args[1], &args[1]);
+        
+        perror("execvp");
+        exit(1);
+    } 
+    else if (pid > 0) {
+        // --- PARENT ---
+        int status;
+        
+        // Wait for the initial launch stop
+        waitpid(pid, &status, WUNTRACED);
+        
+        if (WIFSTOPPED(status)) {
+            // Enter our custom debug loop
+            run_debug_loop(pid);
+        }
+    } 
+    else {
+        perror("fork");
+    }
+}
+
 void execute_command(char **args) {
     if (args[0] == NULL) {
         return; // Empty command
+    }
+
+        // --- NEW: Debugger Hook ---
+    if (strcmp(args[0], "debug") == 0) {
+        if (args[1] == NULL) {
+            printf("Usage: debug <program_name>\n");
+        } else {
+            start_debugger(args);
+        }
+        return; // Return so we don't run the standard fork/exec below
     }
 
     // Background Detection Flag
