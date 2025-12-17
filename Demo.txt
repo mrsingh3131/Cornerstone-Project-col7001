@@ -1,0 +1,115 @@
+========================================================================
+             MINIDBG & CUSTOM SHELL - DEMO WALKTHROUGH
+========================================================================
+
+This document outlines the exact steps to demonstrate the functionality 
+of the custom shell (Lab 1) and the integrated debugger (Lab 2).
+
+PREREQUISITES
+-------------
+1. macOS system.
+2. Root privileges (via sudo) are required for the debugger to function.
+
+STEP 1: COMPILATION
+-------------------
+Clean up previous builds and compile the project fresh.
+
+    $ make clean
+    $ make
+
+    (You should see output confirming compilation of 'shell' and 'target')
+
+STEP 2: STARTING THE SHELL
+--------------------------
+Run the shell with root privileges.
+
+    $ sudo ./shell
+
+========================================================================
+PART A: SHELL FEATURES (Lab 1 Demo)
+========================================================================
+
+STEP A1: STANDARD EXECUTION
+---------------------------
+Verify the shell can run standard system programs.
+
+    myshell> ls -la
+
+STEP A2: REDIRECTION
+--------------------
+Verify that output redirection (>) works.
+
+    myshell> echo "Hello, Professor" > demo.txt
+    myshell> cat demo.txt
+
+    (Output should be: "Hello, Professor")
+
+STEP A3: PIPES
+--------------------
+Verify that piping (|) connects two processes. We will list files and 
+filter for C source files.
+
+    myshell> ls | grep .c
+
+    (Output should list only files ending in .c, e.g., shell.c, target.c)
+
+========================================================================
+PART B: DEBUGGER FEATURES (Lab 2 Demo)
+========================================================================
+
+STEP B1: LOADING THE TARGET
+---------------------------
+Launch the debugger with the test program.
+
+    myshell> debug ./target
+
+STEP B2: RUNNING TO GET ADDRESS (Handling ASLR)
+-----------------------------------------------
+The target program prints the memory address of the 'foo' function. 
+We run it once to get this address.
+
+    minidbg> continue
+
+    (Copy the address printed in "ADDRESS_OF_FOO: 0x...")
+
+STEP B3: SETTING A BREAKPOINT
+-----------------------------
+Use the address copied from the previous step.
+
+    minidbg> break <PASTE_ADDRESS_HERE>
+
+    (Example: break 0x100f2e470)
+    (Output: "Breakpoint set at ...")
+
+STEP B4: TRIGGERING THE BREAKPOINT
+----------------------------------
+Resume execution. The program should loop and hit the breakpoint immediately.
+
+    minidbg> continue
+
+    (Output: "Hit breakpoint!")
+
+STEP B5: INSPECTING STATE (REGISTERS)
+-------------------------------------
+Verify the CPU state when stopped.
+
+    minidbg> regs
+
+    (Output: Displays RIP, RSP, RBP, RAX values)
+
+STEP B6: INSPECTING MEMORY (EXTENSION)
+--------------------------------------
+Verify the memory inspection extension by reading data at the function address.
+
+    minidbg> peek <PASTE_ADDRESS_HERE>
+
+    (Output: "Data at 0x...: 0xffffffff" or similar hex data)
+
+STEP B7: FINISHING
+------------------
+Exit the debugger and the shell.
+
+    minidbg> quit
+    myshell> exit
+
+========================================================================
