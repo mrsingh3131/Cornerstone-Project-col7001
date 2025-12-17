@@ -45,3 +45,7 @@ shell
 shell.dSYM/Contents/Resources/Relocations/x86_64/shell.yml
 shell.dSYM/Contents/Info.plist
 .DS_Store
+target.dSYM/Contents/Info.plist
+target.dSYM/Contents/Resources/DWARF/target
+target
+target.dSYM/Contents/Resources/Relocations/x86_64/target.yml

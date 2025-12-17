@@ -8,6 +8,9 @@
 #include <sys/ptrace.h>
 #include <sys/wait.h>
 #include <sys/user.h>
+#include <mach/mach.h>
+#include <mach/thread_act.h>
+#include <mach/mach_types.h>
 
 #define MAX_CMD_LEN 1024
 #define MAX_ARGS 64
@@ -220,6 +223,48 @@ void disable_breakpoint(pid_t pid, struct Breakpoint *bp) {
     bp->active = 0;
 }
 
+// Helper to print registers on macOS
+void print_registers(pid_t pid) {
+    // 1. Get the Mach task port for the process
+    mach_port_t task;
+    kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
+    if (kr != KERN_SUCCESS) {
+        // This might fail without sudo, but let's try
+        printf("Error getting task: %d\n", kr);
+        return;
+    }
+
+    // 2. Get the first thread in the task
+    thread_act_port_array_t thread_list;
+    mach_msg_type_number_t thread_count;
+    kr = task_threads(task, &thread_list, &thread_count);
+    if (kr != KERN_SUCCESS || thread_count == 0) {
+        printf("Error getting threads\n");
+        return;
+    }
+
+    // 3. Get the state of that thread
+    x86_thread_state64_t state;
+    mach_msg_type_number_t state_count = x86_THREAD_STATE64_COUNT;
+    kr = thread_get_state(thread_list[0], x86_THREAD_STATE64, 
+                         (thread_state_t)&state, &state_count);
+    
+    if (kr == KERN_SUCCESS) {
+        printf("--- CPU Registers ---\n");
+        printf("RIP: 0x%llx\n", state.__rip);
+        printf("RSP: 0x%llx\n", state.__rsp);
+        printf("RBP: 0x%llx\n", state.__rbp);
+        printf("RAX: 0x%llx\n", state.__rax);
+        printf("---------------------\n");
+    } else {
+        printf("Error getting thread state\n");
+    }
+    
+    // Clean up memory
+    vm_deallocate(mach_task_self(), (vm_address_t)thread_list, 
+                 thread_count * sizeof(thread_act_t));
+}
+
 void run_debug_loop(pid_t pid) {
     char line[1024];
     int status;
@@ -250,6 +295,11 @@ void run_debug_loop(pid_t pid) {
                 printf("Usage: break <hex_address>\n");
             }
         }
+
+        // --- COMMAND: REGS ---
+        else if (strcmp(command, "regs") == 0) {
+            print_registers(pid);
+        }
         // --- COMMAND: CONTINUE ---
         else if (strcmp(command, "continue") == 0) {
              printf("Resuming execution...\n");
@@ -268,6 +318,8 @@ void run_debug_loop(pid_t pid) {
             else if (WIFSTOPPED(status)) {
                 if (WSTOPSIG(status) == SIGTRAP) {
                      printf("Hit breakpoint!\n");
+                     // Auto-print registers on break (Optional, but nice!)
+                     print_registers(pid);
                 } else {
                      printf("Child stopped (Signal: %d)\n", WSTOPSIG(status));
                 }
@@ -279,6 +331,7 @@ void run_debug_loop(pid_t pid) {
         }
     }
 }
+
 
 void start_debugger(char **args) {
     printf("Starting debugger for %s...\n", args[1]);
@@ -399,7 +452,7 @@ int main() {
     char *args[MAX_ARGS]; // Array to hold the parsed tokens
 
     // Register signal handlers
-    signal(SIGCHLD, handle_sigchld); // this prevents zombies
+    // signal(SIGCHLD, handle_sigchld); // this prevents zombies
 
     signal(SIGINT, handle_sigint);   // Handle Ctrl-C
 
