@@ -234,6 +234,18 @@ void print_registers(pid_t pid) {
         return;
     }
 
+    // --- GRACEFUL ERROR HANDLING ---
+    if (kr != KERN_SUCCESS) {
+        // We failed to get the task. Check the error code.
+        printf("Error: Could not get task port (Error %d)\n", kr);
+        
+        // Suggest the fix to the user
+        if (kr == KERN_FAILURE) {
+            printf("Hint: You likely need to run this debugger with 'sudo' to inspect registers on macOS.\n");
+        }
+        return;
+    }
+
     // 2. Get the first thread in the task
     thread_act_port_array_t thread_list;
     mach_msg_type_number_t thread_count;
