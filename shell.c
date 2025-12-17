@@ -292,6 +292,22 @@ void run_debug_loop(pid_t pid) {
         char *command = strtok(line, " ");
         if (command == NULL) continue;
 
+        // --- COMMAND: PEEK (Memory Inspection) ---
+        else if (strcmp(command, "peek") == 0) {
+            char *addr_str = strtok(NULL, " ");
+            if (addr_str) {
+                unsigned long addr = strtoul(addr_str, NULL, 16);
+                
+                // Read 4 bytes from the address
+                // Note: ptrace returns the data directly as the return value
+                unsigned int data = ptrace(PT_READ_D, pid, (caddr_t)addr, 0);
+                
+                printf("Data at 0x%lx: 0x%x\n", addr, data);
+            } else {
+                printf("Usage: peek <hex_address>\n");
+            }
+        }
+
         // --- COMMAND: BREAK ---
         if (strcmp(command, "break") == 0) {
             char *addr_str = strtok(NULL, " ");
