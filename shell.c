@@ -223,7 +223,7 @@ void disable_breakpoint(pid_t pid, struct Breakpoint *bp) {
 void run_debug_loop(pid_t pid) {
     char line[1024];
     int status;
-    x86_thread_state64_t state; // To hold registers
+    // Removed: x86_thread_state64_t state; (Not needed for simple resume)
 
     printf("Debugger started. Type 'break <addr>', 'continue', or 'quit'.\n");
 
@@ -252,52 +252,20 @@ void run_debug_loop(pid_t pid) {
         }
         // --- COMMAND: CONTINUE ---
         else if (strcmp(command, "continue") == 0) {
+             printf("Resuming execution...\n");
             
-            // 1. Check if we are stopped at a breakpoint right now
-            ptrace(PT_GETREGS, pid, (caddr_t)&state, 0);
-            unsigned long rip = state.__rip; // Get current instruction pointer
-
-            // Check if RIP-1 matches any of our breakpoints
-            // (RIP is usually 1 byte past the 0xCC instruction)
-            struct Breakpoint *current_bp = NULL;
-            for (int i = 0; i < bp_count; i++) {
-                if (breakpoints[i].active && breakpoints[i].addr == (rip - 1)) {
-                    current_bp = &breakpoints[i];
-                    break;
-                }
-            }
-
-            // 2. If we ARE at a breakpoint, we need to Step-Over it
-            if (current_bp != NULL) {
-                // A. Rewind RIP by 1 to point at the original instruction
-                state.__rip -= 1;
-                ptrace(PT_SETREGS, pid, (caddr_t)&state, 0);
-
-                // B. Restore original code (remove 0xCC)
-                disable_breakpoint(pid, current_bp);
-
-                // C. Single step (execute that one original instruction)
-                ptrace(PT_STEP, pid, (caddr_t)1, 0);
-                waitpid(pid, &status, 0); // Wait for step to finish
-
-                // D. Check if child died during step
-                if (WIFEXITED(status)) break;
-
-                // E. Re-enable breakpoint (put 0xCC back)
-                enable_breakpoint(pid, current_bp);
-            }
-
-            // 3. Resume normal execution
+            // Simplified for macOS: Just resume. 
+            // We are skipping the "rewind and step" logic to avoid Mach API errors.
             ptrace(PT_CONTINUE, pid, (caddr_t)1, 0);
+            
             waitpid(pid, &status, 0);
 
-            // 4. Report status
+            // Report status
             if (WIFEXITED(status)) {
                 printf("Child exited with status %d\n", WEXITSTATUS(status));
                 break;
             } 
             else if (WIFSTOPPED(status)) {
-                // If stopped by SIGTRAP (5), it's likely a breakpoint
                 if (WSTOPSIG(status) == SIGTRAP) {
                      printf("Hit breakpoint!\n");
                 } else {
@@ -311,6 +279,7 @@ void run_debug_loop(pid_t pid) {
         }
     }
 }
+
 void start_debugger(char **args) {
     printf("Starting debugger for %s...\n", args[1]);
 
