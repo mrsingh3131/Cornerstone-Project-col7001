@@ -11,6 +11,7 @@
 #include <mach/mach.h>
 #include <mach/thread_act.h>
 #include <mach/mach_types.h>
+#include <mach/mach_vm.h>
 
 #define MAX_CMD_LEN 1024
 #define MAX_ARGS 64
@@ -199,27 +200,59 @@ struct Breakpoint {
 // Simple storage for up to 10 breakpoints
 struct Breakpoint breakpoints[10]; 
 int bp_count = 0;
-
 void enable_breakpoint(pid_t pid, struct Breakpoint *bp) {
-    // 1. Read the 4 bytes at the address (PT_READ_D is for Data)
+    // 1. Read the 4 bytes at the address
     unsigned int data = ptrace(PT_READ_D, pid, (caddr_t)bp->addr, 0);
     
-    // 2. Save original data so we can restore it later
+    // 2. Save original data
     bp->orig_data = data;
     
     // 3. Modify the lowest byte to 0xCC (INT 3)
-    // We use a bitmask: (data & ~0xFF) keeps top 3 bytes, | 0xCC sets bottom byte
     unsigned int data_with_trap = (data & ~0xFF) | 0xCC;
     
-    // 4. Write the modified data back
-    ptrace(PT_WRITE_D, pid, (caddr_t)bp->addr, data_with_trap);
-    bp->active = 1;
-    printf("Breakpoint set at 0x%lx\n", bp->addr);
-}
+    // 4. Get the task port
+    mach_port_t task;
+    kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
+    
+    if (kr != KERN_SUCCESS) {
+        perror("Failed to get task for pid");
+        return;
+    }
 
+    // --- STEP 5: CHANGE PERMISSIONS (Unlock) ---
+    // VM_PROT_COPY forces a "Copy-on-Write" so we don't corrupt the actual binary file
+    kr = mach_vm_protect(task, bp->addr, sizeof(data_with_trap), 0, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (kr != KERN_SUCCESS) {
+        printf("Failed to change memory protection (Unlock): %d\n", kr);
+        return;
+    }
+
+    // --- STEP 6: WRITE DATA ---
+    kr = mach_vm_write(task, bp->addr, (vm_offset_t)&data_with_trap, sizeof(data_with_trap));
+    if (kr != KERN_SUCCESS) {
+        printf("Failed to write trap instruction: %d\n", kr);
+    } else {
+        bp->active = 1;
+        printf("Breakpoint set at 0x%lx\n", bp->addr);
+    }
+
+    // --- STEP 7: RESTORE PERMISSIONS (Relock) ---
+    // Restore to Read+Execute so the CPU can run it
+    mach_vm_protect(task, bp->addr, sizeof(data_with_trap), 0, VM_PROT_READ | VM_PROT_EXECUTE);
+}
 void disable_breakpoint(pid_t pid, struct Breakpoint *bp) {
-    // 1. Write the original data back to memory
-    ptrace(PT_WRITE_D, pid, (caddr_t)bp->addr, bp->orig_data);
+    // 1. Write the original data back using Mach API
+    mach_port_t task;
+    kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
+    
+    if (kr == KERN_SUCCESS) {
+        kr = mach_vm_write(task, bp->addr, (vm_offset_t)&bp->orig_data, sizeof(bp->orig_data));
+    }
+
+    if (kr != KERN_SUCCESS) {
+         perror("Failed to remove breakpoint");
+    }
+    
     bp->active = 0;
 }
 
