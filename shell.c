@@ -367,6 +367,78 @@ void run_pipeline(char **args, int pipe_idx, int background) {
     }
 }
 
+void run_multistage_pipeline(char **args, int background) {
+    int pipefd[2];
+    int input_fd = STDIN_FILENO; // Start with standard input
+    int cmd_start = 0;
+    pid_t pids[MAX_ARGS]; // Track children to wait for them later
+    int pid_count = 0;
+
+    disable_raw_mode(); // Restore normal terminal for children
+
+    while (args[cmd_start] != NULL) {
+        // 1. Find the next pipe symbol
+        int pipe_idx = -1;
+        for (int i = cmd_start; args[i] != NULL; i++) {
+            if (strcmp(args[i], "|") == 0) {
+                pipe_idx = i;
+                break;
+            }
+        }
+
+        // 2. Terminate current command args
+        if (pipe_idx != -1) args[pipe_idx] = NULL;
+
+        // 3. Setup Pipe (if not the last command)
+        int is_last = (pipe_idx == -1);
+        if (!is_last) {
+            if (pipe(pipefd) == -1) { perror("pipe"); return; }
+        }
+
+        // 4. Fork
+        pid_t pid = fork();
+        if (pid == 0) {
+            // Child Process
+            if (input_fd != STDIN_FILENO) {
+                dup2(input_fd, STDIN_FILENO);
+                close(input_fd);
+            }
+            if (!is_last) {
+                dup2(pipefd[1], STDOUT_FILENO);
+                close(pipefd[1]);
+                close(pipefd[0]); // Close unused read end
+            }
+            handle_redirection(&args[cmd_start]);
+            execvp(args[cmd_start], &args[cmd_start]);
+            perror("execvp");
+            exit(1);
+        } else {
+            // Parent Process
+            pids[pid_count++] = pid;
+            
+            if (input_fd != STDIN_FILENO) close(input_fd); // Close used input
+            if (!is_last) {
+                close(pipefd[1]); // Close write end
+                input_fd = pipefd[0]; // Save read end for next command
+                cmd_start = pipe_idx + 1; // Move to next command
+            } else {
+                break; // Finished
+            }
+        }
+    }
+
+    // 5. Wait for all children
+    if (!background) {
+        for (int i = 0; i < pid_count; i++) {
+            waitpid(pids[i], NULL, 0);
+        }
+    } else {
+        printf("[Started pipeline in background]\n");
+    }
+
+    enable_raw_mode(); // Restore shell mode
+}
+
 // --- BREAKPOINT HELPERS ---
 
 struct Breakpoint {
@@ -627,6 +699,7 @@ void execute_command(char **args) {
     // Background Detection Flag
     int background = 0;
     int i = 0;
+    int bg = 0;
     while (args[i] != NULL){
         i++;
     }
@@ -650,11 +723,13 @@ void execute_command(char **args) {
     }
 
     // Pipeline Detection 
-    for (int j = 0; args[j] != NULL; j++) {
-        if (strcmp(args[j], "|") == 0) {
-            run_pipeline(args, j, background);
-            return; // Pipeline handled, return immediately
-        }
+    int has_pipe = 0;
+    for (int j = 0; args[j]; j++) {
+        if (strcmp(args[j], "|") == 0) { has_pipe = 1; break; }
+    }
+    if (has_pipe) {
+        run_multistage_pipeline(args, bg);
+        return;
     }
     disable_raw_mode(); //Restore normal terminal for the child
 
