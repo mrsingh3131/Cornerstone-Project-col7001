@@ -32,14 +32,18 @@ void disable_raw_mode() {
 }
 
 void enable_raw_mode() {
-    tcgetattr(STDIN_FILENO, &orig_termios);
-    atexit(disable_raw_mode); // Ensure we reset terminal on exit
-
     struct termios raw = orig_termios;
     // Disable ICANON (line buffering) and ECHO (auto-printing)
     raw.c_lflag &= ~(ICANON | ECHO);
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 }
+
+void setup_terminal() {
+    tcgetattr(STDIN_FILENO, &orig_termios);
+    atexit(disable_raw_mode); // Register cleanup once
+    enable_raw_mode();
+}
+
 
 // HISTORY FUNCTIONS
 void add_to_history(const char *cmd) {
@@ -68,7 +72,8 @@ void add_to_history(const char *cmd) {
 
 // CUSTOM INPUT READER (Handles Arrow Keys)
 void read_input(char *buffer) {
-    int pos = 0;
+    int pos = 0;   // Total length of the command
+    int cursor = 0; // Current cursor position (index)
     int history_index = history_count; // Start "below" the last history item
     char c;
 
@@ -82,11 +87,32 @@ void read_input(char *buffer) {
             printf("\n");
             break;
         } 
-        else if (c == 127) { // BACKSPACE key
-            if (pos > 0) {
+        else if (c == 127 || c == 8) { // BACKSPACE key
+            // if (pos > 0) {
+            //     pos--;
+            //     printf("\b \b"); // Visual backspace
+            //     fflush(stdout); // Flush after backspace
+            // }
+            if (cursor > 0) {
+                // 1. Shift memory left to delete the char
+                if (cursor < pos) {
+                    memmove(&buffer[cursor - 1], &buffer[cursor], pos - cursor);
+                }
+                
+                // 2. Decrement counters
+                cursor--;
                 pos--;
-                printf("\b \b"); // Visual backspace
-                fflush(stdout); // Flush after backspace
+                buffer[pos] = '\0';
+
+                // 3. Update Visuals
+                printf("\b"); // Move back one
+                // Print the rest of the string (shifted) + a space at the end to wipe the last char
+                printf("%s ", &buffer[cursor]); 
+                // Move cursor back to the correct edit position
+                // (We printed (len-cursor) chars + 1 space. We need to go back that much)
+                for (int i = 0; i < (pos - cursor + 1); i++) printf("\033[D");
+                
+                fflush(stdout);// Flush after backspace
             }
         } 
         else if (c == '\033') { // ESCAPE sequence (Arrow keys)
@@ -95,43 +121,73 @@ void read_input(char *buffer) {
             if (read(STDIN_FILENO, &seq[1], 1) == 0) continue;
 
             if (seq[0] == '[') {
-                char *target_cmd = NULL;
+                // char *target_cmd = NULL;
 
                 if (seq[1] == 'A') { // UP ARROW
                     if (history_index > 0) {
                         history_index--;
-                        target_cmd = history[history_index];
+                        // target_cmd = history[history_index];
+                        // Clear current line visual
+                        while (cursor > 0) { printf("\b \b"); cursor--; } // Erase back
+                        
+                        strcpy(buffer, history[history_index]);
+                        pos = strlen(buffer);
+                        cursor = pos;
+                        printf("%s", buffer);
+                        fflush(stdout);
                     }
                 } else if (seq[1] == 'B') { // DOWN ARROW
                     if (history_index < history_count) {
                         history_index++;
+                        // Clear current line visual
+                        while (cursor > 0) { printf("\b \b"); cursor--; }
+
                         if (history_index < history_count) {
-                            target_cmd = history[history_index];
+                            strcpy(buffer, history[history_index]);
                         } else {
-                            target_cmd = ""; // Back to empty
+                            buffer[0] = '\0';
                         }
+                        pos = strlen(buffer);
+                        cursor = pos;
+                        printf("%s", buffer);
+                        fflush(stdout);
                     }
                 }
 
-                // If we moved, update the screen
-                if (target_cmd != NULL) {
-                    // Erase current line
-                    while (pos > 0) {
-                        printf("\b \b");
-                        pos--;
+                else if (seq[1] == 'C') { // RIGHT ARROW
+                    if (cursor < pos) {
+                        cursor++;
+                        printf("\033[C"); // ANSI code for Move Right
+                        fflush(stdout);
                     }
-                    // Copy new command
-                    strcpy(buffer, target_cmd);
-                    pos = strlen(buffer);
-                    printf("%s", buffer);
-                    fflush(stdout); // Flush after history replace
+                }
+                else if (seq[1] == 'D') { // LEFT ARROW
+                    if (cursor > 0) {
+                        cursor--;
+                        printf("\033[D"); // ANSI code for Move Left
+                        fflush(stdout);
+                    }
                 }
             }
         } 
         else { // Normal Character
-            if (pos < MAX_CMD_LEN - 1) {
-                buffer[pos++] = c;
-                printf("%c", c); // Echo manually
+            if (pos < MAX_CMD_LEN - 1 && c >= 32 && c <= 126) {
+                if (cursor < pos) {
+                    memmove(&buffer[cursor + 1], &buffer[cursor], pos - cursor);
+                }
+                buffer[cursor] = c;
+                pos++;
+                cursor++;
+                buffer[pos] = '\0';
+
+                printf("%c", c); // Print the new char
+                
+                // Reprint the rest of the line so it doesn't get eaten
+                if (cursor < pos) {
+                    printf("%s", &buffer[cursor]);
+                    // Move visual cursor back to where we are typing
+                    for (int i = 0; i < (pos - cursor); i++) printf("\033[D");
+                }
                 fflush(stdout);  // Flush after typing a letter
             }
         }
@@ -600,6 +656,7 @@ void execute_command(char **args) {
             return; // Pipeline handled, return immediately
         }
     }
+    disable_raw_mode(); //Restore normal terminal for the child
 
     // Standard Commands
     pid_t pid = fork();
@@ -630,6 +687,7 @@ void execute_command(char **args) {
             printf("[Started process %d]\n", pid); // Don't wait
         }
     }
+    enable_raw_mode(); //Turn Raw Mode back on for your next prompt
 }
 
 int main() {
@@ -641,7 +699,7 @@ int main() {
 
     signal(SIGINT, handle_sigint);   // Handle Ctrl-C
 
-    enable_raw_mode(); // Turn on arrow keys support
+    setup_terminal();
 
     // while (1) {
     //     printf("myshell> ");
