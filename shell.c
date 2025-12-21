@@ -686,6 +686,47 @@ void execute_command(char **args) {
         return;
     }
 
+    // --- EXPORT COMMAND ---
+    if (strcmp(args[0], "export") == 0) {
+        if (args[1] == NULL) {
+            extern char **environ; // Access the global environment list
+            for (char **env = environ; *env != 0; env++) {
+                printf("%s\n", *env);
+            }
+        }
+        
+        else {
+            // Argument provided: Set variable (VAR=VALUE)
+            char *key = strtok(args[1], "=");
+            char *val = strtok(NULL, ""); // Get everything after the first "="
+            
+            if (key != NULL) {
+                // If val is NULL (e.g. "export VAR="), treat as empty string
+                if (val == NULL) val = ""; 
+                
+                // setenv(key, value, overwrite_flag)
+                if (setenv(key, val, 1) != 0) {
+                    perror("export");
+                }
+            } else {
+                printf("Usage: export VAR=VALUE\n");
+            }
+        }
+        return; // Done. Do not fork.
+    }
+
+    // --- UNSET COMMAND ---
+    if (strcmp(args[0], "unset") == 0) {
+        if (args[1] == NULL) {
+            fprintf(stderr, "myshell: expected argument to \"unset\"\n");
+        } else {
+            if (unsetenv(args[1]) != 0) {
+                perror("myshell");
+            }
+        }
+        return; // Done. Do not fork.
+    }
+
         // --- NEW: Debugger Hook ---
     if (strcmp(args[0], "debug") == 0) {
         if (args[1] == NULL) {
