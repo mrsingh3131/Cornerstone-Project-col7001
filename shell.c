@@ -10,6 +10,7 @@
 #include <sys/user.h>
 #include <termios.h> // REQUIRED for raw mode (Arrow keys)
 #include <ctype.h>   // REQUIRED for isdigit
+#include <errno.h> // REQUIRED for error checking (ECHILD, EINTR)
 
 #include <mach/mach.h>
 #include <mach/thread_act.h>
@@ -19,6 +20,14 @@
 #define MAX_CMD_LEN 1024
 #define MAX_ARGS 64
 #define HISTORY_SIZE 20
+#define MAX_JOBS 20
+
+struct Job {
+    int id;       // Job ID (1, 2, 3...)
+    pid_t pid;    // Process ID
+    int status;   // 1=Running, 0=Stopped
+    char cmd[MAX_CMD_LEN];
+};
 
 // HISTORY GLOBALS
 char history[HISTORY_SIZE][MAX_CMD_LEN];
@@ -44,6 +53,33 @@ void setup_terminal() {
     enable_raw_mode();
 }
 
+//JOB Control
+struct Job job_list[MAX_JOBS];
+int job_count = 0;
+
+void add_job(pid_t pid, int status, char *cmd) {
+    if (job_count < MAX_JOBS) {
+        job_list[job_count].id = job_count + 1;
+        job_list[job_count].pid = pid;
+        job_list[job_count].status = status;
+        strcpy(job_list[job_count].cmd, cmd);
+        job_count++;
+    }
+}
+
+void delete_job(pid_t pid) {
+    int found = 0;
+    for (int i = 0; i < job_count; i++) {
+        if (job_list[i].pid == pid) {
+            found = 1;
+        }
+        if (found && i < job_count - 1) {
+            job_list[i] = job_list[i + 1]; // Shift left
+            job_list[i].id = i + 1;        // Renumber IDs
+        }
+    }
+    if (found) job_count--;
+}
 
 // HISTORY FUNCTIONS
 void add_to_history(const char *cmd) {
@@ -195,9 +231,15 @@ void read_input(char *buffer) {
 }
 
 void handle_sigchld(int sig) {
-    (void)sig; // Silence the unused parameter warning
-    // Clean up any child processes that have finished
-    while (waitpid(-1, NULL, WNOHANG) > 0);
+    (void)sig;
+    int status;
+    pid_t pid;
+    // WNOHANG: Check if any child has exited without blocking
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        if (WIFEXITED(status) || WIFSIGNALED(status)) {
+            delete_job(pid); // Remove from list if finished
+        }
+    }
 }
 
 void handle_sigint(int sig) {
@@ -326,7 +368,7 @@ void run_pipeline(char **args, int pipe_idx, int background) {
     args[pipe_idx] = NULL; // Split the args array
     char **args2 = &args[pipe_idx + 1];
 
-    // --- Left Child (cmd1) ---
+    // Left Child (cmd1)
     if ((pid1 = fork()) == 0) { // Store PID in pid1
         close(fd[0]);               // Close Read end
         dup2(fd[1], STDOUT_FILENO); // Output -> Pipe Write
@@ -338,7 +380,7 @@ void run_pipeline(char **args, int pipe_idx, int background) {
         exit(1);
     }
 
-    // --- Right Child (cmd2) ---
+    // Right Child (cmd2)
     if ((pid2 = fork()) == 0) {// Store PID in pid2
         close(fd[1]);               // Close Write end
         dup2(fd[0], STDIN_FILENO);  // Input <- Pipe Read
@@ -350,7 +392,7 @@ void run_pipeline(char **args, int pipe_idx, int background) {
         exit(1);
     }
 
-    // --- Parent ---
+    // Parent
     close(fd[0]);
     close(fd[1]);
     
@@ -439,7 +481,7 @@ void run_multistage_pipeline(char **args, int background) {
     enable_raw_mode(); // Restore shell mode
 }
 
-// --- BREAKPOINT HELPERS ---
+// BREAKPOINT HELPERS
 
 struct Breakpoint {
     unsigned long addr;
@@ -469,7 +511,7 @@ void enable_breakpoint(pid_t pid, struct Breakpoint *bp) {
         return;
     }
 
-    // --- STEP 5: CHANGE PERMISSIONS (Unlock) ---
+    // STEP 5: CHANGE PERMISSIONS (Unlock)
     // VM_PROT_COPY forces a "Copy-on-Write" so we don't corrupt the actual binary file
     kr = mach_vm_protect(task, bp->addr, sizeof(data_with_trap), 0, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
     if (kr != KERN_SUCCESS) {
@@ -477,7 +519,7 @@ void enable_breakpoint(pid_t pid, struct Breakpoint *bp) {
         return;
     }
 
-    // --- STEP 6: WRITE DATA ---
+    // STEP 6: WRITE DATA
     kr = mach_vm_write(task, bp->addr, (vm_offset_t)&data_with_trap, sizeof(data_with_trap));
     if (kr != KERN_SUCCESS) {
         printf("Failed to write trap instruction: %d\n", kr);
@@ -486,7 +528,7 @@ void enable_breakpoint(pid_t pid, struct Breakpoint *bp) {
         printf("Breakpoint set at 0x%lx\n", bp->addr);
     }
 
-    // --- STEP 7: RESTORE PERMISSIONS (Relock) ---
+    // STEP 7: RESTORE PERMISSIONS (Relock)
     // Restore to Read+Execute so the CPU can run it
     mach_vm_protect(task, bp->addr, sizeof(data_with_trap), 0, VM_PROT_READ | VM_PROT_EXECUTE);
 }
@@ -512,7 +554,7 @@ void print_registers(pid_t pid) {
     mach_port_t task;
     kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
     
-    // --- GRACEFUL ERROR HANDLING ---
+    // GRACEFUL ERROR HANDLING
     if (kr != KERN_SUCCESS) {
         // We failed to get the task. Check the error code.
         printf("Error: Could not get task port (Error %d)\n", kr);
@@ -540,7 +582,7 @@ void print_registers(pid_t pid) {
                          (thread_state_t)&state, &state_count);
     
     if (kr == KERN_SUCCESS) {
-        printf("--- CPU Registers ---\n");
+        printf("CPU Registers\n");
         printf("RIP: 0x%llx\n", state.__rip);
         printf("RSP: 0x%llx\n", state.__rsp);
         printf("RBP: 0x%llx\n", state.__rbp);
@@ -570,7 +612,7 @@ void run_debug_loop(pid_t pid) {
         char *command = strtok(line, " ");
         if (command == NULL) continue;
 
-        // --- COMMAND: PEEK (Memory Inspection) ---
+        // COMMAND: PEEK (Memory Inspection)
         else if (strcmp(command, "peek") == 0) {
             char *addr_str = strtok(NULL, " ");
             if (addr_str) {
@@ -586,7 +628,7 @@ void run_debug_loop(pid_t pid) {
             }
         }
 
-        // --- COMMAND: BREAK ---
+        // COMMAND: BREAK
         if (strcmp(command, "break") == 0) {
             char *addr_str = strtok(NULL, " ");
             if (addr_str) {
@@ -602,11 +644,11 @@ void run_debug_loop(pid_t pid) {
             }
         }
 
-        // --- COMMAND: REGS ---
+        // COMMAND: REGS
         else if (strcmp(command, "regs") == 0) {
             print_registers(pid);
         }
-        // --- COMMAND: CONTINUE ---
+        // COMMAND: CONTINUE
         else if (strcmp(command, "continue") == 0) {
              printf("Resuming execution...\n");
             
@@ -614,7 +656,17 @@ void run_debug_loop(pid_t pid) {
             // We are skipping the "rewind and step" logic to avoid Mach API errors.
             ptrace(PT_CONTINUE, pid, (caddr_t)1, 0);
             
-            waitpid(pid, &status, 0);
+            int wait_res = waitpid(pid, &status, 0);
+
+            if (wait_res == -1) {
+                if (errno == ECHILD) {
+                    printf("Child exited normally.\n");
+                    break;
+                } else {
+                    perror("waitpid");
+                    break;
+                }
+            }
 
             // Report status
             if (WIFEXITED(status)) {
@@ -642,10 +694,12 @@ void run_debug_loop(pid_t pid) {
 void start_debugger(char **args) {
     printf("Starting debugger for %s...\n", args[1]);
 
+    signal(SIGCHLD, SIG_DFL);
+
     pid_t pid = fork();
 
     if (pid == 0) {
-        // --- CHILD ---
+        // CHILD
         // Arg 3: NULL is fine here.
         // Arg 4: Must be 0 (int), not NULL.
         ptrace(PT_TRACE_ME, 0, NULL, 0);
@@ -658,7 +712,7 @@ void start_debugger(char **args) {
         exit(1);
     } 
     else if (pid > 0) {
-        // --- PARENT ---
+        // PARENT
         int status;
         
         // Wait for the initial launch stop
@@ -672,6 +726,8 @@ void start_debugger(char **args) {
     else {
         perror("fork");
     }
+
+    signal(SIGCHLD, handle_sigchld);
 }
 
 void execute_command(char **args) {
@@ -686,7 +742,58 @@ void execute_command(char **args) {
         return;
     }
 
-    // --- EXPORT COMMAND ---
+    // JOBS COMMAND
+    if (strcmp(args[0], "jobs") == 0) {
+        for (int i = 0; i < job_count; i++) {
+            printf("[%d] %d %s %s\n", 
+                job_list[i].id, 
+                job_list[i].pid, 
+                (job_list[i].status == 1 ? "Running" : "Stopped"), 
+                job_list[i].cmd);
+        }
+        return;
+    }
+
+    // FG COMMAND
+    if (strcmp(args[0], "fg") == 0) {
+        if (args[1] == NULL) { printf("Usage: fg <job_id>\n"); return; }
+        int jid = atoi(args[1]);
+        if (jid > 0 && jid <= job_count) {
+            pid_t pid = job_list[jid-1].pid;
+            printf("Resuming %d in foreground...\n", pid);
+            
+            // Send SIGCONT in case it was stopped
+            kill(pid, SIGCONT);
+            
+            // Wait for it (Foreground logic)
+            disable_raw_mode();
+            waitpid(pid, NULL, 0);
+            enable_raw_mode();
+            
+            // It likely exited, so remove it
+            delete_job(pid);
+        } else {
+            printf("Job %d not found\n", jid);
+        }
+        return;
+    }
+
+    // BG COMMAND
+    if (strcmp(args[0], "bg") == 0) {
+        if (args[1] == NULL) { printf("Usage: bg <job_id>\n"); return; }
+        int jid = atoi(args[1]);
+        if (jid > 0 && jid <= job_count) {
+            pid_t pid = job_list[jid-1].pid;
+            printf("Resuming %d in background...\n", pid);
+            kill(pid, SIGCONT); // Just continue, don't wait
+            job_list[jid-1].status = 1; // Mark running
+        } else {
+            printf("Job %d not found\n", jid);
+        }
+        return;
+    }
+
+    // EXPORT COMMAND
     if (strcmp(args[0], "export") == 0) {
         if (args[1] == NULL) {
             extern char **environ; // Access the global environment list
@@ -715,7 +822,7 @@ void execute_command(char **args) {
         return; // Done. Do not fork.
     }
 
-    // --- UNSET COMMAND ---
+    // UNSET COMMAND
     if (strcmp(args[0], "unset") == 0) {
         if (args[1] == NULL) {
             fprintf(stderr, "myshell: expected argument to \"unset\"\n");
@@ -727,12 +834,14 @@ void execute_command(char **args) {
         return; // Done. Do not fork.
     }
 
-        // --- NEW: Debugger Hook ---
+        // NEW: Debugger Hook
     if (strcmp(args[0], "debug") == 0) {
         if (args[1] == NULL) {
             printf("Usage: debug <program_name>\n");
         } else {
+            disable_raw_mode();
             start_debugger(args);
+            enable_raw_mode();
         }
         return; // Return so we don't run the standard fork/exec below
     }
@@ -740,7 +849,6 @@ void execute_command(char **args) {
     // Background Detection Flag
     int background = 0;
     int i = 0;
-    int bg = 0;
     while (args[i] != NULL){
         i++;
     }
@@ -769,7 +877,7 @@ void execute_command(char **args) {
         if (strcmp(args[j], "|") == 0) { has_pipe = 1; break; }
     }
     if (has_pipe) {
-        run_multistage_pipeline(args, bg);
+        run_multistage_pipeline(args, background);
         return;
     }
     disable_raw_mode(); //Restore normal terminal for the child
@@ -782,6 +890,9 @@ void execute_command(char **args) {
     } 
     else if (pid == 0) {
         // CHILD 
+
+        signal(SIGINT, SIG_DFL);  // Let child handle Ctrl+C normally
+        signal(SIGTSTP, SIG_DFL); // Let child handle Ctrl+Z normally
     
         // Handle Redirection first then execute
         handle_redirection(args);
@@ -795,12 +906,30 @@ void execute_command(char **args) {
     else {
         // PARENT waiting for child to exit
         if (background == 0) {
-            // FIX: Wait ONLY for this specific child (pid)
-            // If the signal handler already reaped it, this returns -1 (which is fine, we move on).
-            waitpid(pid, NULL, 0);
-            // wait(NULL); // Wait for foreground process
+            int status;
+            
+            // 1. Use WUNTRACED to catch Ctrl+Z
+            // 2. Save result to check for Race Condition
+            pid_t wait_result = waitpid(pid, &status, WUNTRACED);
+
+            if (wait_result > 0) {
+                // NORMAL CASE
+                if (WIFSTOPPED(status)) {
+                    printf("\n[%d] Stopped %s\n", job_count + 1, args[0]);
+                    add_job(pid, 0, args[0]); // Add to list as Stopped
+                }
+            } 
+            else if (wait_result == -1) {
+                // RACE CONDITION FIX
+                if (errno != ECHILD && errno != EINTR) {
+                    perror("waitpid");
+                }
+                // If ECHILD, it means handle_sigchld already cleaned it up. 
+                // We do nothing, which is correct.
+            }
         } else {
             printf("[Started process %d]\n", pid); // Don't wait
+            add_job(pid, 1, args[0]);
         }
     }
     enable_raw_mode(); //Turn Raw Mode back on for your next prompt
@@ -811,9 +940,11 @@ int main() {
     char *args[MAX_ARGS]; // Array to hold the parsed tokens
 
     // Register signal handlers
-    // signal(SIGCHLD, handle_sigchld); // this prevents zombies
+    signal(SIGCHLD, handle_sigchld); // this prevents zombies
 
     signal(SIGINT, handle_sigint);   // Handle Ctrl-C
+
+    signal(SIGTSTP, SIG_IGN); //Ignore Ctrl+Z in shell
 
     setup_terminal();
 
@@ -855,7 +986,7 @@ int main() {
 
         if (strcmp(command, "exit") == 0) break;
 
-        // --- HANDLE !N (HISTORY EXPANSION) ---
+        // HANDLE !N (HISTORY EXPANSION)
         if (command[0] == '!') {
             int target_idx = -1;
             if (command[1] == '!') {
