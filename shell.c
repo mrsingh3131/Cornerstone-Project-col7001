@@ -8,6 +8,9 @@
 #include <sys/ptrace.h>
 #include <sys/wait.h>
 #include <sys/user.h>
+#include <termios.h> // REQUIRED for raw mode (Arrow keys)
+#include <ctype.h>   // REQUIRED for isdigit
+
 #include <mach/mach.h>
 #include <mach/thread_act.h>
 #include <mach/mach_types.h>
@@ -15,6 +18,125 @@
 
 #define MAX_CMD_LEN 1024
 #define MAX_ARGS 64
+#define HISTORY_SIZE 20
+
+// HISTORY GLOBALS
+char history[HISTORY_SIZE][MAX_CMD_LEN];
+int history_count = 0;
+
+// TERMINAL GLOBALS
+struct termios orig_termios;
+
+void disable_raw_mode() {
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+}
+
+void enable_raw_mode() {
+    tcgetattr(STDIN_FILENO, &orig_termios);
+    atexit(disable_raw_mode); // Ensure we reset terminal on exit
+
+    struct termios raw = orig_termios;
+    // Disable ICANON (line buffering) and ECHO (auto-printing)
+    raw.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
+
+// HISTORY FUNCTIONS
+void add_to_history(const char *cmd) {
+    if (strlen(cmd) == 0) return; // Don't save empty commands
+
+    // Check if it's a duplicate of the immediate last command
+    if (history_count > 0 && strcmp(history[(history_count - 1) % HISTORY_SIZE], cmd) == 0) {
+        return;
+    }
+
+    if (history_count < HISTORY_SIZE) {
+        strcpy(history[history_count], cmd);
+    } else {
+        // For a simple circular implementation in this context, 
+        // we will just shift everything left to keep indices consistent 1..20
+        // This is easier for the !N command logic.
+        for (int i = 1; i < HISTORY_SIZE; i++) {
+            strcpy(history[i-1], history[i]);
+        }
+        strcpy(history[HISTORY_SIZE - 1], cmd);
+    }
+    // We only increment count up to HISTORY_SIZE for this simple sliding window implementation
+    // However, to keep "total commands" accurate for !N, we can just cap the visual list
+    if (history_count < HISTORY_SIZE) history_count++;
+}
+
+// CUSTOM INPUT READER (Handles Arrow Keys)
+void read_input(char *buffer) {
+    int pos = 0;
+    int history_index = history_count; // Start "below" the last history item
+    char c;
+
+    buffer[0] = '\0';
+
+    while (1) {
+        if (read(STDIN_FILENO, &c, 1) == -1) break;
+
+        if (c == '\n') { // ENTER key
+            buffer[pos] = '\0';
+            printf("\n");
+            break;
+        } 
+        else if (c == 127) { // BACKSPACE key
+            if (pos > 0) {
+                pos--;
+                printf("\b \b"); // Visual backspace
+                fflush(stdout); // Flush after backspace
+            }
+        } 
+        else if (c == '\033') { // ESCAPE sequence (Arrow keys)
+            char seq[3];
+            if (read(STDIN_FILENO, &seq[0], 1) == 0) continue;
+            if (read(STDIN_FILENO, &seq[1], 1) == 0) continue;
+
+            if (seq[0] == '[') {
+                char *target_cmd = NULL;
+
+                if (seq[1] == 'A') { // UP ARROW
+                    if (history_index > 0) {
+                        history_index--;
+                        target_cmd = history[history_index];
+                    }
+                } else if (seq[1] == 'B') { // DOWN ARROW
+                    if (history_index < history_count) {
+                        history_index++;
+                        if (history_index < history_count) {
+                            target_cmd = history[history_index];
+                        } else {
+                            target_cmd = ""; // Back to empty
+                        }
+                    }
+                }
+
+                // If we moved, update the screen
+                if (target_cmd != NULL) {
+                    // Erase current line
+                    while (pos > 0) {
+                        printf("\b \b");
+                        pos--;
+                    }
+                    // Copy new command
+                    strcpy(buffer, target_cmd);
+                    pos = strlen(buffer);
+                    printf("%s", buffer);
+                    fflush(stdout); // Flush after history replace
+                }
+            }
+        } 
+        else { // Normal Character
+            if (pos < MAX_CMD_LEN - 1) {
+                buffer[pos++] = c;
+                printf("%c", c); // Echo manually
+                fflush(stdout);  // Flush after typing a letter
+            }
+        }
+    }
+}
 
 void handle_sigchld(int sig) {
     (void)sig; // Silence the unused parameter warning
@@ -428,6 +550,13 @@ void execute_command(char **args) {
     if (args[0] == NULL) {
         return; // Empty command
     }
+    // HISTORY COMMAND
+    if (strcmp(args[0], "history") == 0) {
+        for(int i = 0; i < history_count; i++) {
+            printf("  %d  %s\n", i + 1, history[i]);
+        }
+        return;
+    }
 
         // --- NEW: Debugger Hook ---
     if (strcmp(args[0], "debug") == 0) {
@@ -512,35 +641,70 @@ int main() {
 
     signal(SIGINT, handle_sigint);   // Handle Ctrl-C
 
+    enable_raw_mode(); // Turn on arrow keys support
+
+    // while (1) {
+    //     printf("myshell> ");
+        
+    //     // Read input from user
+    //     if (fgets(command, MAX_CMD_LEN, stdin) == NULL) {
+    //         break; // Exit on Ctrl+D
+    //     }
+
+    //     // Removing the trailing newline character that fgets adds
+    //     command[strcspn(command, "\n")] = 0;
+
+    //     // Checking for exit command
+    //     if (strcmp(command, "exit") == 0) {
+    //         break;
+    //     }
+
+    //     // parsing begins
+    //     parse_quoted_input(command, args);
+
+    //     // Debugging parser temporarily
+    //     // printf("Parsed commands:\n");
+    //     // for (int j = 0; args[j] != NULL; j++) {
+    //     //     printf("  Arg[%d]: '%s'\n", j, args[j]);
+    //     // }
+    //     // printf("----------------------\n");
+
+    //     execute_command(args);
+
+    // }
 
     while (1) {
         printf("myshell> ");
+        fflush(stdout); 
         
-        // Read input from user
-        if (fgets(command, MAX_CMD_LEN, stdin) == NULL) {
-            break; // Exit on Ctrl+D
+        read_input(command); // Custom reader
+
+        if (strcmp(command, "exit") == 0) break;
+
+        // --- HANDLE !N (HISTORY EXPANSION) ---
+        if (command[0] == '!') {
+            int target_idx = -1;
+            if (command[1] == '!') {
+                // !! runs the last command
+                if (history_count > 0) target_idx = history_count;
+            } else if (isdigit(command[1])) {
+                // !N runs Nth command
+                target_idx = atoi(&command[1]);
+            }
+
+            if (target_idx > 0 && target_idx <= history_count) {
+                // Replace current command with historical one
+                strcpy(command, history[target_idx - 1]);
+                printf("The command to be run is: %s\n", command); // Print it so user sees what ran
+            } else {
+                printf("myshell: command not found in history\n");
+                continue;
+            }
         }
 
-        // Removing the trailing newline character that fgets adds
-        command[strcspn(command, "\n")] = 0;
-
-        // Checking for exit command
-        if (strcmp(command, "exit") == 0) {
-            break;
-        }
-
-        // parsing begins
+        add_to_history(command);
         parse_quoted_input(command, args);
-
-        // Debugging parser temporarily
-        // printf("Parsed commands:\n");
-        // for (int j = 0; args[j] != NULL; j++) {
-        //     printf("  Arg[%d]: '%s'\n", j, args[j]);
-        // }
-        // printf("----------------------\n");
-
         execute_command(args);
-
     }
     
     return 0;
