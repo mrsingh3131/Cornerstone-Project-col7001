@@ -239,6 +239,7 @@ void handle_sigchld(int sig) {
         if (WIFEXITED(status) || WIFSIGNALED(status)) {
             delete_job(pid); // Remove from list if finished
         }
+        // if WIF exited and WIFsignaled are false it means it was likely just Stopped (Ctrl+Z) i.e wifstopped will be true.
     }
 }
 
@@ -264,7 +265,7 @@ void parse_quoted_input(char *line, char **args) {
     char *ptr = line;
     int in_quotes = 0;
     
-    // Clear args array first (good hygiene)
+    // Clear args array first
     for(int i=0; i<MAX_ARGS; i++) args[i] = NULL;
 
     while (*ptr != '\0' && arg_count < MAX_ARGS - 1) {
