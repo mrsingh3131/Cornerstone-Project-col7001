@@ -492,94 +492,86 @@ struct Breakpoint {
 // Simple storage for up to 10 breakpoints
 struct Breakpoint breakpoints[10]; 
 int bp_count = 0;
-void enable_breakpoint(pid_t pid, struct Breakpoint *bp) {
-    // 1. Read the 4 bytes at the address
-    unsigned int data = ptrace(PT_READ_D, pid, (caddr_t)bp->addr, 0);
+
+int find_breakpoint_index(unsigned long addr) {
+    for (int i = 0; i < bp_count; i++) {
+        if (breakpoints[i].addr == addr) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// 1. ENABLE (Updated to use task)
+void enable_breakpoint(mach_port_t task, struct Breakpoint *bp) {
+    // Read original data
+    unsigned int data = 0;
+    // Note: We use mach_vm_read_overwrite because ptrace's PT_READ_D uses pid, not task.
+    // But mixing ptrace and Mach is messy. Let's stick to Mach for memory.
+    mach_vm_size_t data_cnt = sizeof(data);
+    kern_return_t kr = mach_vm_read_overwrite(task, bp->addr, sizeof(data), (vm_address_t)&data, &data_cnt);
     
-    // 2. Save original data
+    if (kr != KERN_SUCCESS) {
+        // Fallback to ptrace if Mach read fails (rare)
+        // We assume the caller (run_debug_loop) has the pid if needed,
+        printf("Failed to read memory: %d\n", kr);
+        return;
+    }
+    
     bp->orig_data = data;
-    
-    // 3. Modify the lowest byte to 0xCC (INT 3)
     unsigned int data_with_trap = (data & ~0xFF) | 0xCC;
     
-    // 4. Get the task port
-    mach_port_t task;
-    kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
-    
-    if (kr != KERN_SUCCESS) {
-        perror("Failed to get task for pid");
-        return;
-    }
-
-    // STEP 5: CHANGE PERMISSIONS (Unlock)
-    // VM_PROT_COPY forces a "Copy-on-Write" so we don't corrupt the actual binary file
+    // Unlock
     kr = mach_vm_protect(task, bp->addr, sizeof(data_with_trap), 0, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
     if (kr != KERN_SUCCESS) {
-        printf("Failed to change memory protection (Unlock): %d\n", kr);
+        printf("Failed to unlock: %d\n", kr);
         return;
     }
 
-    // STEP 6: WRITE DATA
+    // Write Trap
     kr = mach_vm_write(task, bp->addr, (vm_offset_t)&data_with_trap, sizeof(data_with_trap));
-    if (kr != KERN_SUCCESS) {
-        printf("Failed to write trap instruction: %d\n", kr);
-    } else {
+    if (kr != KERN_SUCCESS) printf("Failed to write trap: %d\n", kr);
+    else {
         bp->active = 1;
         printf("Breakpoint set at 0x%lx\n", bp->addr);
     }
 
-    // STEP 7: RESTORE PERMISSIONS (Relock)
-    // Restore to Read+Execute so the CPU can run it
+    // Relock
     mach_vm_protect(task, bp->addr, sizeof(data_with_trap), 0, VM_PROT_READ | VM_PROT_EXECUTE);
 }
-void disable_breakpoint(pid_t pid, struct Breakpoint *bp) {
-    // 1. Write the original data back using Mach API
-    mach_port_t task;
-    kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
-    
-    if (kr == KERN_SUCCESS) {
-        kr = mach_vm_write(task, bp->addr, (vm_offset_t)&bp->orig_data, sizeof(bp->orig_data));
+
+// 2. DISABLE (Updated to use task)
+void disable_breakpoint(mach_port_t task, struct Breakpoint *bp) {
+    // Unlock
+    kern_return_t kr = mach_vm_protect(task, bp->addr, sizeof(bp->orig_data), 0, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (kr != KERN_SUCCESS) {
+        printf("Failed to unlock for removal: %d\n", kr);
+        return;
     }
 
-    if (kr != KERN_SUCCESS) {
-         perror("Failed to remove breakpoint");
-    }
-    
+    // Restore Original
+    kr = mach_vm_write(task, bp->addr, (vm_offset_t)&bp->orig_data, sizeof(bp->orig_data));
+    if (kr != KERN_SUCCESS) printf("Failed to restore instruction: %d\n", kr);
+
+    // Relock
+    mach_vm_protect(task, bp->addr, sizeof(bp->orig_data), 0, VM_PROT_READ | VM_PROT_EXECUTE);
     bp->active = 0;
 }
 
-// Helper to print registers on macOS
-void print_registers(pid_t pid) {
-    // 1. Get the Mach task port for the process
-    mach_port_t task;
-    kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
-    
-    // GRACEFUL ERROR HANDLING
-    if (kr != KERN_SUCCESS) {
-        // We failed to get the task. Check the error code.
-        printf("Error: Could not get task port (Error %d)\n", kr);
-        
-        // Suggest the fix to the user
-        if (kr == KERN_FAILURE) {
-            printf("Hint: You likely need to run this debugger with 'sudo' to inspect registers on macOS.\n");
-        }
-        return;
-    }
-
-    // 2. Get the first thread in the task
+// 3. REGS (Updated to use task)
+void print_registers(mach_port_t task) {
     thread_act_port_array_t thread_list;
     mach_msg_type_number_t thread_count;
-    kr = task_threads(task, &thread_list, &thread_count);
+    kern_return_t kr = task_threads(task, &thread_list, &thread_count);
+    
     if (kr != KERN_SUCCESS || thread_count == 0) {
-        printf("Error getting threads\n");
+        printf("Error getting threads: %d\n", kr);
         return;
     }
 
-    // 3. Get the state of that thread
     x86_thread_state64_t state;
     mach_msg_type_number_t state_count = x86_THREAD_STATE64_COUNT;
-    kr = thread_get_state(thread_list[0], x86_THREAD_STATE64, 
-                         (thread_state_t)&state, &state_count);
+    kr = thread_get_state(thread_list[0], x86_THREAD_STATE64, (thread_state_t)&state, &state_count);
     
     if (kr == KERN_SUCCESS) {
         printf("CPU Registers\n");
@@ -588,19 +580,14 @@ void print_registers(pid_t pid) {
         printf("RBP: 0x%llx\n", state.__rbp);
         printf("RAX: 0x%llx\n", state.__rax);
         printf("---------------------\n");
-    } else {
-        printf("Error getting thread state\n");
     }
     
-    // Clean up memory
-    vm_deallocate(mach_task_self(), (vm_address_t)thread_list, 
-                 thread_count * sizeof(thread_act_t));
+    vm_deallocate(mach_task_self(), (vm_address_t)thread_list, thread_count * sizeof(thread_act_t));
 }
-
 void run_debug_loop(pid_t pid) {
     char line[1024];
     int status;
-    // Removed: x86_thread_state64_t state; (Not needed for simple resume)
+    mach_port_t task;
 
     printf("Debugger started. Type 'break <addr>', 'continue', or 'quit'.\n");
 
@@ -611,6 +598,12 @@ void run_debug_loop(pid_t pid) {
 
         char *command = strtok(line, " ");
         if (command == NULL) continue;
+        kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
+        if (kr != KERN_SUCCESS) {
+            // If we can't get the port, we can't inspect memory/regs, 
+            // but we might still be able to continue/quit via ptrace.
+            printf("Warning: Could not get task port (Error %d). Memory/Regs commands may fail.\n", kr);
+        }
 
         // COMMAND: PEEK (Memory Inspection)
         else if (strcmp(command, "peek") == 0) {
@@ -637,22 +630,69 @@ void run_debug_loop(pid_t pid) {
                 
                 // Add to our list
                 breakpoints[bp_count].addr = addr;
-                enable_breakpoint(pid, &breakpoints[bp_count]);
+                enable_breakpoint(task, &breakpoints[bp_count]);
                 bp_count++;
             } else {
                 printf("Usage: break <hex_address>\n");
             }
         }
 
+        else if (strcmp(command, "remove") == 0) {
+            char *addr_str = strtok(NULL, " ");
+            if (addr_str) {
+                unsigned long addr = strtoul(addr_str, NULL, 16);
+                int index = find_breakpoint_index(addr);
+                
+                if (index != -1) {
+                    // 1. Restore the original instruction (remove trap)
+                    disable_breakpoint(task, &breakpoints[index]);
+                    printf("Breakpoint removed at 0x%lx\n", addr);
+
+                    // 2. Remove from array (Shift everyone down)
+                    for (int i = index; i < bp_count - 1; i++) {
+                        breakpoints[i] = breakpoints[i+1];
+                    }
+                    bp_count--;
+                } else {
+                    printf("No breakpoint found at 0x%lx\n", addr);
+                }
+            } else {
+                printf("Usage: remove <hex_address>\n");
+            }
+        }
         // COMMAND: REGS
         else if (strcmp(command, "regs") == 0) {
-            print_registers(pid);
+            print_registers(task);
         }
+
+        else if (strcmp(command, "step") == 0) {
+            // 1. Tell ptrace to execute ONE instruction
+            ptrace(PT_STEP, pid, (caddr_t)1, 0);
+
+            // 2. Wait for it to finish that one step
+            int wait_res = waitpid(pid, &status, 0);
+
+            // 3. Handle Status
+            if (wait_res == -1) {
+                if (errno == ECHILD) { printf("Child exited normally.\n"); break; }
+                else { perror("waitpid"); break; }
+            }
+
+            if (WIFEXITED(status)) {
+                printf("Child exited with status %d\n", WEXITSTATUS(status));
+                break;
+            } 
+            else if (WIFSTOPPED(status)) {
+                // Print where we are after the step
+                printf("Stepped.\n");
+                print_registers(task); // Helpful to see where we landed
+            }
+        }
+
         // COMMAND: CONTINUE
         else if (strcmp(command, "continue") == 0) {
              printf("Resuming execution...\n");
             
-            // Simplified for macOS: Just resume. 
             // We are skipping the "rewind and step" logic to avoid Mach API errors.
             ptrace(PT_CONTINUE, pid, (caddr_t)1, 0);
             
@@ -677,7 +717,7 @@ void run_debug_loop(pid_t pid) {
                 if (WSTOPSIG(status) == SIGTRAP) {
                      printf("Hit breakpoint!\n");
                      // Auto-print registers on break (Optional, but nice!)
-                     print_registers(pid);
+                     print_registers(task);
                 } else {
                      printf("Child stopped (Signal: %d)\n", WSTOPSIG(status));
                 }
