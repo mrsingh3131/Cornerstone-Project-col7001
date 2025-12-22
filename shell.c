@@ -727,6 +727,9 @@ void run_debug_loop(pid_t pid) {
             kill(pid, SIGKILL);
             break;
         }
+        else {
+            printf("Unknown command: %s\n", command);
+        }
     }
 }
 
