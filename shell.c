@@ -610,19 +610,27 @@ void run_debug_loop(pid_t pid) {
             char *addr_str = strtok(NULL, " ");
             if (addr_str) {
                 unsigned long addr = strtoul(addr_str, NULL, 16);
+                unsigned int data = 0;
+                mach_vm_size_t data_cnt = sizeof(data);
                 
                 // Read 4 bytes from the address
                 // Note: ptrace returns the data directly as the return value
-                unsigned int data = ptrace(PT_READ_D, pid, (caddr_t)addr, 0);
-                
-                printf("Data at 0x%lx: 0x%x\n", addr, data);
+                // unsigned int data = ptrace(PT_READ_D, pid, (caddr_t)addr, 0);
+
+                kern_return_t kr = mach_vm_read_overwrite(task, (mach_vm_address_t)addr, sizeof(data), (vm_address_t)&data, &data_cnt);
+
+                if (kr != KERN_SUCCESS) {
+                    printf("Peek failed (Error %d). Address 0x%lx might be invalid or unreadable.\n", kr, addr);
+                } else {
+                    printf("Data at 0x%lx: 0x%x\n", addr, data);
+                }
             } else {
                 printf("Usage: peek <hex_address>\n");
             }
         }
 
         // COMMAND: BREAK
-        if (strcmp(command, "break") == 0) {
+        else if (strcmp(command, "break") == 0) {
             char *addr_str = strtok(NULL, " ");
             if (addr_str) {
                 // Parse hex string to unsigned long
